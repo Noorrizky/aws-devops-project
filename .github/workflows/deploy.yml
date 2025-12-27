@@ -1,0 +1,61 @@
+name: Deploy to AWS EC2
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  AWS_REGION: us-east-1 # Ganti jika regionmu beda (misal: ap-southeast-1)
+  ECR_REPOSITORY: demo-devops-app # Pastikan nama ini SAMA PERSIS dengan nama repo ECR kamu
+  CONTAINER_NAME: my-app-container
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Build, tag, and push image to Amazon ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: latest
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+
+  deploy-to-ec2:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: SSH and Deploy
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            # Login ECR dari dalam EC2 (Token docker login cuma valid 12 jam, jadi harus login ulang)
+            aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ secrets.ECR_REPOSITORY_URI }}
+
+            # Pull image terbaru
+            docker pull ${{ secrets.ECR_REPOSITORY_URI }}:latest
+
+            # Stop & Hapus container lama (jika ada) agar tidak bentrok port
+            docker stop ${{ env.CONTAINER_NAME }} || true
+            docker rm ${{ env.CONTAINER_NAME }} || true
+
+            # Jalankan container baru
+            docker run -d --name ${{ env.CONTAINER_NAME }} -p 80:80 ${{ secrets.ECR_REPOSITORY_URI }}:latest
